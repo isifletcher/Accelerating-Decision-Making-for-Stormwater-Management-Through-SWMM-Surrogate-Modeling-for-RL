@@ -15,7 +15,6 @@ from tensorflow.keras.models import load_model
 
 surrogate_model = load_model('surrogate_model_FINAL.h5')
 
-
 import pickle
 
 # Load the scaler from the pickle file
