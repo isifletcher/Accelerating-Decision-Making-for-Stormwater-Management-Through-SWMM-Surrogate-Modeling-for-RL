@@ -1,0 +1,384 @@
+import pandas as pd
+import gym
+import tensorflow as tf
+from typing import Any, List, Sequence, Tuple
+from tensorflow.keras.losses import Huber
+from pyswmm import Simulation, Nodes, Links, RainGages
+import numpy as np
+from datetime import datetime
+from gym import spaces
+import math
+
+# Loading surrogate model
+
+from tensorflow.keras.models import load_model
+
+surrogate_model = load_model('surrogate_model_FINAL.h5')
+
+
+import pickle
+
+# Load the scaler from the pickle file
+with open('scaler_FINAL.pkl', 'rb') as f:
+    scaler = pickle.load(f)
+    
+with open('scaler_predict_FINAL.pkl', 'rb') as f:
+    scaler_predict = pickle.load(f)
+
+
+# In[3]:
+
+
+data_2011=pd.read_csv("PySWMM_Pond data_1 hour steps_2011_2.csv")
+data_all=data_2011
+
+
+
+times=[]
+for i in range(len(data_all["datetime"])):
+    times.append(datetime.strptime(data_all["datetime"].iloc[i], '%Y-%m-%d %H:%M:%S'))
+
+data_all2=data_all
+data_all2["datetime"]=times
+
+class SurrogateEnv_withoutFuture(gym.Env):
+    #def __init__(self, inp_file, start_time, end_time , seed=None, initial_depth_pond1=0,tau=None):
+    def __init__(self, inp_file, start_time, end_time,tau=None, tau_label=None, initial_depth_pond1=0):
+        
+        # To avoid issues with . on names 
+        self.tau_label=tau_label
+        
+                
+        # Label
+        self.env_label=f"Surrogate_nf_{self.tau_label}tau"
+        
+        # Seed
+        #self.seed = seed
+        #if seed is not None:
+        #    tf.random.set_seed(seed)  # Set the TensorFlow random seed
+        # Initializing simulation
+        self.input_file = inp_file
+        # Reading input file
+        self.sim = Simulation(self.input_file) 
+        self.model=surrogate_model
+        # Setting time step
+        self.control_time_step = 3600 # 1 hour for control time step
+        self.sim.step_advance(self.control_time_step)
+        self.start_time=start_time
+        self.end_time=end_time
+        self.sim.start_time=self.start_time
+        self.sim.end_time=self.end_time  
+        self.count=0   
+        self.prec_count=0
+        self.index=data_all2["datetime"][data_all2["datetime"]==self.sim.start_time]
+        #print(self.index)
+        #self.hours_in_future=hours_in_future       
+        
+        self.tau= tau
+        
+        if tau==None:
+            self.tau=1.059909248473855e-07 # Median calculated at the beggining of the notebook
+            #self.tau=2.6846164785562602e-08 # First quartile calculated at the beggining of the notebook
+            #self.tau=0.1320380508871325 # Third quartile calculated at the beggining of the notebook
+
+
+        self.initial_depth_pond1=initial_depth_pond1
+        
+        ### For state        
+        self.depth=self.initial_depth_pond1
+        self.volume=0
+        #self.cum_inf=0
+        #self.lat_inf=0
+        self.total_inf=0
+        self.total_outf=0
+        self.setting=0
+        self.current_prec=0
+        #self.future_prec=0
+ 
+        # Comment: The main objects in a SWMM 5 drainage network are the nodes and links. Nodes are Junctions, Storages, Dividers and Outfalls. Links are Conduits, Pumps, Orifices, Weirs and Outlets.
+
+        ## Nodes are Junctions, Storages, Dividers and Outfalls
+        # Init node objects
+        node_object= Nodes(self.sim)
+        # Storage Unit Pond 1
+        self.Pond_1=node_object["Pond_1"]
+        # Outfall 
+        self.Basin_1_Outfall=node_object["Basin_1_Outfall"]
+        # Changing the initial depth of pond 1 to the given value
+        self.Pond_1.initial_depth=self.initial_depth_pond1 
+        
+        
+        ##  Links are Conduits, Pumps, Orifices, Weirs and Outlets
+        # Init link objects
+        link_object= Links(self.sim)
+        # Weir Pond 1
+        self.Pond_1_Weir=link_object["Pond1_weir"]
+        # Orifice Pond 1 with valve
+        self.Pond1_control_gate=link_object["Pond1_1_valve"]
+        
+
+        self.sim.start()
+        # Changing initial depth to the value given
+        #self.Pond_1.initial_depth=self.initial_depth_pond1 
+        if self.sim.current_time == self.sim.start_time:
+            #print(self.Pond_1.depth)
+            self.Pond1_control_gate.target_setting = 0 # The valve starts closed
+        sim_len = self.sim.end_time - self.sim.start_time
+        self.T = int(sim_len.total_seconds()/self.control_time_step)
+        self.t = 1
+        #self.state = np.asarray([self.setting,self.depth,self.cum_inf,self.total_inf,self.total_outf,self.volume,self.current_prec, self.future_prec])
+        #self.state = np.asarray([self.current_prec, self.future_prec,self.setting,self.depth,self.cum_inf,self.total_inf,self.total_outf,self.volume])
+        # with cumulative inflow
+        #self.state = np.asarray([self.setting,self.depth,self.cum_inf,self.total_inf,self.total_outf,self.volume,self.current_prec, self.future_prec])
+        # without cumulative inflow
+        #self.state = np.asarray([self.setting,self.depth,self.total_inf,self.total_outf,self.volume,self.current_prec, self.future_prec])
+        self.state = np.asarray([self.setting,self.depth,self.total_inf,self.total_outf,self.volume,self.current_prec])
+        self.original_state=self.state
+        
+        self.action_space = spaces.Discrete(3) # Open, half_way, closed
+        #self.observation_space = spaces.Box(low=0, high=1000, shape=(len(self.state),), dtype=np.float32) 
+        
+        low = [0, 0, 0, 0, 0, 0]  # Minimum values for each feature
+        high = [1, 100, 100, 100, 10000000,10]  # Maximum values for each feature 
+        self.observation_space = gym.spaces.Box(low=np.array(low), high=np.array(high), dtype=np.float32)
+        
+    def step(self, action):
+        
+        #self.sim.__next__()
+        #start=time.time()
+        current_setting=action*0.5
+        self.setting=current_setting
+        pre_array_for_prediction=np.array([self.original_state[5],self.original_state[0],self.original_state[1],self.original_state[2],self.original_state[3],self.original_state[4]])
+        pre_array_for_prediction_reshaped=pre_array_for_prediction.reshape(1, -1)
+        array_scaled=scaler.transform(pre_array_for_prediction_reshaped)
+        array_for_prediction=array_scaled.reshape(1,1,6)
+        predicted_pond1=self.model.predict(array_for_prediction)
+
+        # Descaling
+        predicted_pond1_descaled=scaler_predict.inverse_transform(predicted_pond1[:,0]) 
+        
+        # Precipitation
+        self.current_prec=data_all2["precipitation"].iloc[self.index.index[0]+self.prec_count+1]
+        #self.future_prec=data_all2["precipitation"].iloc[self.index.index[0]+self.prec_count+1+self.hours_in_future] # Looking at next value
+        self.prec_count+=1
+
+
+        self.state=np.insert(predicted_pond1_descaled,0,self.setting) # np.insert(array, position to insert, thing to insert)  
+        self.state=np.insert(self.state, 5, self.current_prec)
+        #self.state=np.insert(self.state, 6, self.future_prec)
+        self.original_state=self.state
+        self.count+=1
+
+        #end=time.time()
+        # Time that the step took
+
+
+            
+            
+        if self.state[1]==self.tau:
+            reward=1
+
+        else:
+            absolute_difference=abs(self.state[1]-self.tau)
+            reward= - math.exp(absolute_difference) + 2
+            
+        
+        if self.t < self.T-1:
+            done = False
+        else:
+            done = True
+        
+        self.t += 1
+        
+        info = {}
+        
+        
+        #if self.count>11: # Use SWMM every minute (steps are 5 sec)
+        if self.count>9: # Use SWMM every 10 hours (steps are 1 hour)
+            self.count=0
+            
+            
+        # Normalize the state using min-max scaling
+        state_min = np.min(self.state)
+        state_max = np.max(self.state)
+        self.state = (self.state - state_min) / (state_max - state_min)
+            
+        return self.state, reward, done, info, self.original_state
+    
+
+    
+    def reset(self):
+        self.sim.close()
+        self.sim = Simulation(self.input_file) 
+        self.model=surrogate_model
+        self.sim.start_time=self.start_time
+        self.sim.end_time=self.end_time  
+        self.prec_count=0
+        # Setting time step
+        self.sim.step_advance(self.control_time_step)
+ 
+        # Comment: The main objects in a SWMM 5 drainage network are the nodes and links. Nodes are Junctions, Storages, Dividers and Outfalls. Links are Conduits, Pumps, Orifices, Weirs and Outlets.
+
+        ## Nodes are Junctions, Storages, Dividers and Outfalls
+        # Init node objects
+        node_object= Nodes(self.sim)
+        # Storage Unit Pond 1
+        Pond_1=node_object["Pond_1"]
+        # Outfall 
+        Basin_1_Outfall=node_object["Basin_1_Outfall"]
+        
+        # Changing the initial depth of pond 1 to the given value
+        self.Pond_1.initial_depth=self.initial_depth_pond1 
+        
+        ##  Links are Conduits, Pumps, Orifices, Weirs and Outlets
+        # Init link objects
+        link_object= Links(self.sim)
+        # Weir Pond 1
+        Pond_1_Weir=link_object["Pond1_weir"]
+        # Orifice Pond 1 with valve
+        Pond1_control_gate=link_object["Pond1_1_valve"]
+
+        self.sim.start()
+        self.t=1
+        if self.sim.current_time == self.sim.start_time:
+            self.Pond1_control_gate.target_setting = 0 # The valve starts closed
+            
+
+        #self.setting=self.Pond1_control_gate.target_setting
+        #self.depth=self.Pond_1.depth
+        #self.volume=self.Pond_1.volume
+        #self.cum_inf=self.Pond_1.cumulative_inflow
+        #self.lat_inf=self.Pond_1.lateral_inflow
+        #self.total_inf=self.Pond_1.total_inflow
+        #self.total_outf=self.Pond_1.total_outflow
+        
+        ### For state        
+        self.depth=self.initial_depth_pond1
+        self.volume=0
+        #self.cum_inf=0
+        #self.lat_inf=0
+        self.total_inf=0
+        self.total_outf=0
+        self.setting=0
+        self.current_prec=0
+        #self.future_prec=0
+         
+        
+        # Precipitation
+        self.current_prec=data_all2["precipitation"].iloc[self.index.index[0]+self.prec_count+1]
+        #self.future_prec=data_all2["precipitation"].iloc[self.index.index[0]+self.prec_count+1+self.hours_in_future] # Looking at next value
+        self.prec_count+=1
+        
+        
+        #self.state = np.asarray([self.current_prec, self.future_prec,self.setting,self.depth,self.cum_inf,self.total_inf,self.total_outf,self.volume])
+        #self.state = np.asarray([self.setting,self.depth,self.cum_inf,self.total_inf,self.total_outf,self.volume,self.current_prec, self.future_prec])
+        # with cumulative inflow
+        #self.state = np.asarray([self.setting,self.depth,self.cum_inf,self.total_inf,self.total_outf,self.volume,self.current_prec, self.future_prec])
+        # without cumulative inflow
+        #self.state = np.asarray([self.setting,self.depth,self.total_inf,self.total_outf,self.volume,self.current_prec, self.future_prec])
+        self.state = np.asarray([self.setting,self.depth,self.total_inf,self.total_outf,self.volume,self.current_prec])
+        self.original_state=self.state
+        
+        # Normalize the state using min-max scaling
+        state_min = np.min(self.state)
+        state_max = np.max(self.state)
+        self.state = (self.state - state_min) / (state_max - state_min)
+        
+        return self.state, self.original_state
+    
+    
+    def run_episode(initial_state: tf.Tensor,   model: tf.keras.Model,  max_steps: int) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+        
+        """Runs a single episode to collect training data."""
+
+        action_probs = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
+        values = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
+        rewards = tf.TensorArray(dtype=tf.int32, size=0, dynamic_size=True)
+
+        initial_state_shape = initial_state.shape
+        state = initial_state
+
+        for t in tf.range(max_steps):
+            # Convert state into a batched tensor (batch size = 1)
+            state = tf.expand_dims(state, 0)
+
+            # Run the model and to get action probabilities and critic value
+            action_logits_t, value = model(state)
+
+            # Sample next action from the action probability distribution
+            action = tf.random.categorical(action_logits_t, 1)[0, 0]
+            action_probs_t = tf.nn.softmax(action_logits_t)
+
+            # Store critic values
+            values = values.write(t, tf.squeeze(value))
+
+            # Store log probability of the action chosen
+            action_probs = action_probs.write(t, action_probs_t[0, action])
+
+            # Apply action to the environment to get next state and reward
+            state, reward, done = tf_env_step(action)
+            state.set_shape(initial_state_shape)
+
+            # Store reward
+            rewards = rewards.write(t, reward)
+
+            if tf.cast(done, tf.bool):
+                break
+
+        action_probs = action_probs.stack()
+        values = values.stack()
+        rewards = rewards.stack()
+
+        return action_probs, values, rewards
+    
+    def get_expected_return(rewards: tf.Tensor, gamma: float, standardize: bool = True) -> tf.Tensor:
+        
+        
+        """Compute expected returns per timestep."""
+
+        n = tf.shape(rewards)[0]
+        returns = tf.TensorArray(dtype=tf.float32, size=n)
+
+        # Start from the end of `rewards` and accumulate reward sums
+        # into the `returns` array
+        rewards = tf.cast(rewards[::-1], dtype=tf.float32)
+        discounted_sum = tf.constant(0.0)
+        discounted_sum_shape = discounted_sum.shape
+        for i in tf.range(n):
+            reward = rewards[i]
+            discounted_sum = reward + gamma * discounted_sum
+            discounted_sum.set_shape(discounted_sum_shape)
+            returns = returns.write(i, discounted_sum)
+        returns = returns.stack()[::-1]
+
+        if standardize:
+            returns = ((returns - tf.math.reduce_mean(returns)) / (tf.math.reduce_std(returns) + eps))
+
+        return returns
+    
+    # huber_loss = tf.keras.losses.Huber(reduction=tf.keras.losses.Reduction.SUM) # depends on the tf version
+    huber_loss = Huber(reduction='sum')
+
+    def compute_loss(action_probs: tf.Tensor,  values: tf.Tensor,  returns: tf.Tensor) -> tf.Tensor:
+        """Computes the combined Actor-Critic loss."""
+
+        advantage = returns - values
+
+        action_log_probs = tf.math.log(action_probs)
+        actor_loss = -tf.math.reduce_sum(action_log_probs * advantage)
+
+        critic_loss = huber_loss(values, returns)
+
+        return actor_loss + critic_loss
+
+    
+    def close(self):
+        self.sim.report()
+        self.sim.close()
+
+
+# In[ ]:
+
+
+
+
