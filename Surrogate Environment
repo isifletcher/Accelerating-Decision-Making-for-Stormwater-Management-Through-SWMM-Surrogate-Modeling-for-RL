@@ -42,7 +42,6 @@ data_all2=data_all
 data_all2["datetime"]=times
 
 class SurrogateEnv_withoutFuture(gym.Env):
-    #def __init__(self, inp_file, start_time, end_time , seed=None, initial_depth_pond1=0,tau=None):
     def __init__(self, inp_file, start_time, end_time,tau=None, tau_label=None, initial_depth_pond1=0):
         
         # To avoid issues with . on names 
@@ -52,10 +51,7 @@ class SurrogateEnv_withoutFuture(gym.Env):
         # Label
         self.env_label=f"Surrogate_nf_{self.tau_label}tau"
         
-        # Seed
-        #self.seed = seed
-        #if seed is not None:
-        #    tf.random.set_seed(seed)  # Set the TensorFlow random seed
+
         # Initializing simulation
         self.input_file = inp_file
         # Reading input file
@@ -71,15 +67,12 @@ class SurrogateEnv_withoutFuture(gym.Env):
         self.count=0   
         self.prec_count=0
         self.index=data_all2["datetime"][data_all2["datetime"]==self.sim.start_time]
-        #print(self.index)
-        #self.hours_in_future=hours_in_future       
+     
         
         self.tau= tau
         
         if tau==None:
-            self.tau=1.059909248473855e-07 # Median calculated at the beggining of the notebook
-            #self.tau=2.6846164785562602e-08 # First quartile calculated at the beggining of the notebook
-            #self.tau=0.1320380508871325 # Third quartile calculated at the beggining of the notebook
+            self.tau=1.059909248473855e-07 # Median
 
 
         self.initial_depth_pond1=initial_depth_pond1
@@ -87,13 +80,10 @@ class SurrogateEnv_withoutFuture(gym.Env):
         ### For state        
         self.depth=self.initial_depth_pond1
         self.volume=0
-        #self.cum_inf=0
-        #self.lat_inf=0
         self.total_inf=0
         self.total_outf=0
         self.setting=0
         self.current_prec=0
-        #self.future_prec=0
  
         # Comment: The main objects in a SWMM 5 drainage network are the nodes and links. Nodes are Junctions, Storages, Dividers and Outfalls. Links are Conduits, Pumps, Orifices, Weirs and Outlets.
 
@@ -159,13 +149,11 @@ class SurrogateEnv_withoutFuture(gym.Env):
         
         # Precipitation
         self.current_prec=data_all2["precipitation"].iloc[self.index.index[0]+self.prec_count+1]
-        #self.future_prec=data_all2["precipitation"].iloc[self.index.index[0]+self.prec_count+1+self.hours_in_future] # Looking at next value
         self.prec_count+=1
 
 
         self.state=np.insert(predicted_pond1_descaled,0,self.setting) # np.insert(array, position to insert, thing to insert)  
         self.state=np.insert(self.state, 5, self.current_prec)
-        #self.state=np.insert(self.state, 6, self.future_prec)
         self.original_state=self.state
         self.count+=1
 
@@ -243,20 +231,10 @@ class SurrogateEnv_withoutFuture(gym.Env):
         if self.sim.current_time == self.sim.start_time:
             self.Pond1_control_gate.target_setting = 0 # The valve starts closed
             
-
-        #self.setting=self.Pond1_control_gate.target_setting
-        #self.depth=self.Pond_1.depth
-        #self.volume=self.Pond_1.volume
-        #self.cum_inf=self.Pond_1.cumulative_inflow
-        #self.lat_inf=self.Pond_1.lateral_inflow
-        #self.total_inf=self.Pond_1.total_inflow
-        #self.total_outf=self.Pond_1.total_outflow
         
         ### For state        
         self.depth=self.initial_depth_pond1
         self.volume=0
-        #self.cum_inf=0
-        #self.lat_inf=0
         self.total_inf=0
         self.total_outf=0
         self.setting=0
@@ -266,16 +244,8 @@ class SurrogateEnv_withoutFuture(gym.Env):
         
         # Precipitation
         self.current_prec=data_all2["precipitation"].iloc[self.index.index[0]+self.prec_count+1]
-        #self.future_prec=data_all2["precipitation"].iloc[self.index.index[0]+self.prec_count+1+self.hours_in_future] # Looking at next value
         self.prec_count+=1
         
-        
-        #self.state = np.asarray([self.current_prec, self.future_prec,self.setting,self.depth,self.cum_inf,self.total_inf,self.total_outf,self.volume])
-        #self.state = np.asarray([self.setting,self.depth,self.cum_inf,self.total_inf,self.total_outf,self.volume,self.current_prec, self.future_prec])
-        # with cumulative inflow
-        #self.state = np.asarray([self.setting,self.depth,self.cum_inf,self.total_inf,self.total_outf,self.volume,self.current_prec, self.future_prec])
-        # without cumulative inflow
-        #self.state = np.asarray([self.setting,self.depth,self.total_inf,self.total_outf,self.volume,self.current_prec, self.future_prec])
         self.state = np.asarray([self.setting,self.depth,self.total_inf,self.total_outf,self.volume,self.current_prec])
         self.original_state=self.state
         
