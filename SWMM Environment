@@ -126,13 +126,10 @@ class SWMMEnv_withoutFuture(gym.Env):
         
         # Precipitation
         self.current_prec=data_all2["precipitation"].iloc[self.index.index[0]+self.prec_count+1]
-        #self.future_prec=data_all2["precipitation"].iloc[self.index.index[0]+self.prec_count+2] # Looking at next value ### CHANGE
         self.prec_count+=1
 
         
-        # with cumulative inflow
-        #self.state = np.asarray([self.setting,self.depth,self.cum_inf,self.total_inf,self.total_outf,self.volume,self.current_prec])
-        # without cumulative inflow
+
         self.state = np.asarray([self.setting,self.depth,self.total_inf,self.total_outf,self.volume,self.current_prec])
         self.original_state=self.state
          
